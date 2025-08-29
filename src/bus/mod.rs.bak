@@ -1,0 +1,37 @@
+pub trait Message: Send + Sync + 'static {
+    fn as_any(&self) -> &dyn Any;
+}
+
+pub trait MessageHandler<T: Message>: Send + Sync {
+    fn handle(&self, message: &T);
+}
+
+trait HandlerWrapper: Send + Sync {
+    fn handle_any(&self, message: &dyn Message);
+}
+
+struct TypedHandler<T: Message> {
+    handler: Arc<dyn MessageHandler<T>>,
+}
+
+impl <T: Message> HandlerWrapper for TypedHandler<T> {
+    fn handle_any(&self, message: &dyn Message) {
+        if let Some(typed_message) = message.as_any().downcast_ref::<T>() {
+            self.handler.handle(typed_message);
+        }
+    }
+}
+
+pub struct MessageBus {
+    handlers: Arc<Mutex<HashMap<TypeId, Vec<Arc<dyn HandlerWrapper>>>>>
+}
+
+impl MessageBus {
+    pub fn new() -> Self {
+        Self {
+            handlers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn subscribe<T: Message>(&self, message: Arc<dyn MessageHandler<T>>) {
+        let mut handlers = self.handlers.lock(); // using parking_lot::Mutex, which returns Guard
