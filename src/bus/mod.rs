@@ -1,56 +1,65 @@
+pub enum MessagePayload {
+    PlayerPositionUpdate { player_id: u64, x: f32, y: f32, z: f32 },
+    PlayerHealthChange { player_id: u64, delta: i32 },
+    ItemPickup { player_id: u64, item_id: u64 },
+    ChatMessage { player_id: u64, text: String },
+    Custom {
+        type_name: &'static str,
+        payload: Box<dyn Any + Send + Sync>,
+    }
+}
+
 #[derive(Serialize, Deserialize)]
-struct Message {
-    #[serde(borrow)]
-    id: &'a str,
-    #[serde(borrow)]
-    bincode_payload: &'a [u8],
+pub struct Message {
+    id: &'static str,
+    payload: MessagePayload,
+}
+
+// Mods would define message types like this:
+const PLAYER_ATTACK: &'static str = "player.attack";
+const SPELL_CAST: &'static str = "magic.spell_cast";
+
+// Super fast string comparisons (just pointer equality, not string content)
+if message.id == PLAYER_ATTACK {  // Compares pointers, not characters!
+    // handle attack
 }
 
 impl Message {
     fn get_id(&self) -> &'a str
 }
 
-pub trait MessageHandler {
-    fn get_id(&self) -> String;
-    fn handle(&self, msg: Message);
+#[async_trait::async_trait]
+pub trait SystemHandler: Send + Sync {
+    async fn run(&self, mut inbox: mpsc::UnboundedReceiver<Message>);
 }
 
-pub trait System {
+pub struct MMOSpine {
+    system_channels: HashMap<String, mpsc::UnboundedSender<Message>>,
+    message_router: Arc<ArcSwap<HashMap<String, Vec<String>>>>,
+    state_store: Arc<StateStore>,
 }
 
-pub struct MessageBus {
-    handlers: Arc<Mutex<HashMap<String, Vec<Box<dyn MessageHandler>>>>>, // Allocation is okay because they're handlers
-                                                    // that persist through the whole program,
-                                                    // compared to Messages that are possibly
-                                                    // real-time
-}
-
-impl MessageBus {
-
-    pub fn new() -> Self {
-        Self {
-            handlers: Arc::new(Mutex::new(HashMap::new()))
-        }
+impl MMOSpine {
+    pub fn register_system(&mut self, system_name: String, handler: Box<dyn SystemHandler>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.system_channels.insert(system_name.clone(), tx);
+        
+        // Spawn the system's task with the trait object
+        tokio::spawn(async move {
+            handler.run(rx).await;  // This just waits for incoming messages
+        });
     }
-
-    pub fn subscribe(&self, handler: Box<dyn MessageHandler>) {
-        let handlers = self.handlers.lock();
-        let wrapped_handler = Box::new(handler);
-        handlers
-            .entry(handler.get_id())
-            .or_insert_with(Vec::new)
-            .push(wrapped_handler);
-    }
-
-    pub fn publish(&self, msg: Message) {
-        let handlers = self.handlers.lock();
-
-        if let Some(handler_list) = handlers.get(&msg.get_id()) {
-            for handler in handler_list {
-                handler.handle(msg)
+    
+    pub fn publish(&self, message: Message) {
+        let router = self.message_router.load();
+        
+        // Find all systems that want this message type
+        if let Some(subscribers) = router.get(&message.id) {
+            for system_name in subscribers {
+                if let Some(sender) = self.system_channels.get(system_name) {
+                    let _ = sender.send(message.clone());
+                }
             }
         }
     }
-
 }
-        
