@@ -1,31 +1,67 @@
+#[derive(Clone, Debug)]
 pub enum MessagePayload {
-    PlayerPositionUpdate { player_id: u64, x: f32, y: f32, z: f32 },
-    PlayerHealthChange { player_id: u64, delta: i32 },
-    ItemPickup { player_id: u64, item_id: u64 },
-    ChatMessage { player_id: u64, text: String },
-    Custom {
-        type_name: &'static str,
-        payload: Box<dyn Any + Send + Sync>,
-    }
+    Bytes12([u8; 12]),
+    Bytes24([u8; 24]),
+    Bytes48([u8; 48]),
+    Bytes64([u8; 64]),
+    Bytes128([u8; 128]),
+    Large(Box<[u8]>),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Message {
-    id: &'static str,
-    payload: MessagePayload,
-}
-
-// Mods would define message types like this:
-const PLAYER_ATTACK: &'static str = "player.attack";
-const SPELL_CAST: &'static str = "magic.spell_cast";
-
-// Super fast string comparisons (just pointer equality, not string content)
-if message.id == PLAYER_ATTACK {  // Compares pointers, not characters!
-    // handle attack
+    pub id: &'static str,
+    pub payload: MessagePayload,
+    pub len: usize,
 }
 
 impl Message {
-    fn get_id(&self) -> &'a str
+    pub fn new<T: serde::Serialize>(id: &'static str, data: &T) -> Self {
+        let bytes = bincode::serialize(data).unwrap();
+        
+        let payload = match bytes.len() {
+
+            0..=12 => {
+                let mut arr = [0u8; 12];
+                arr[..bytes.len()].copy_from_slice(&bytes);
+                MessagePayload::Bytes12(arr)
+            }
+            13..=24 => {
+                let mut arr = [0u8; 24];
+                arr[..bytes.len()].copy_from_slice(&bytes);
+                MessagePayload::Bytes24(arr)
+            }
+            25..=48 => {
+                let mut arr = [0u8; 48];
+                arr[..bytes.len()].copy_from_slice(&bytes);
+                MessagePayload::Bytes48(arr)
+            }
+            49..=64 => {
+                let mut arr = [0u8; 64];
+                arr[..bytes.len()].copy_from_slice(&bytes);
+                MessagePayload::Bytes64(arr)
+            }
+            65..=128 => {
+                let mut arr = [0u8; 128];
+                arr[..bytes.len()].copy_from_slice(&bytes);
+                MessagePayload::Bytes128(arr)
+            }
+            _ => MessagePayload::Large(bytes.into_boxed_slice()),
+        };
+
+        Self { id, payload }
+    }
+    
+    pub fn serialized_data(&self) -> &[u8] {
+        match &self.payload {
+            MessagePayload::Bytes12(arr) => arr,
+            MessagePayload::Bytes24(arr) => arr,
+            MessagePayload::Bytes48(arr) => arr,
+            MessagePayload::Bytes64(arr) => arr,
+            MessagePayload::Bytes128(arr) => arr,
+            MessagePayload::Large(boxed) => boxed,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -33,31 +69,40 @@ pub trait SystemHandler: Send + Sync {
     async fn run(&self, mut inbox: mpsc::UnboundedReceiver<Message>);
 }
 
-pub struct MMOSpine {
-    system_channels: HashMap<String, mpsc::UnboundedSender<Message>>,
-    message_router: Arc<ArcSwap<HashMap<String, Vec<String>>>>,
-    state_store: Arc<StateStore>,
+pub struct Spine {
+    system_channels: Arc<ArcSwap<HashMap<String, mpsc::UnboundedSender<Message>>>>, // Arc because
+                                                                                    // it needs to
+                                                                                    // be moved
+                                                                                    // across
+                                                                                    // threads,
+                                                                                    // ArcSwap for
+                                                                                    // hot-swappable
+                                                                                    // mods
+    message_router: Arc<ArcSwap<HashMap<String, Vec<String>>>>, // Same thing as on top
 }
 
-impl MMOSpine {
+impl Spine {
     pub fn register_system(&mut self, system_name: String, handler: Box<dyn SystemHandler>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.system_channels.insert(system_name.clone(), tx);
+        self.system_channels.insert(system_name, tx);
         
-        // Spawn the system's task with the trait object
         tokio::spawn(async move {
-            handler.run(rx).await;  // This just waits for incoming messages
+            handler.run(rx).await;
         });
     }
     
     pub fn publish(&self, message: Message) {
         let router = self.message_router.load();
         
-        // Find all systems that want this message type
         if let Some(subscribers) = router.get(&message.id) {
             for system_name in subscribers {
                 if let Some(sender) = self.system_channels.get(system_name) {
-                    let _ = sender.send(message.clone());
+                    if let Err(_) = sender.send(message.clone()) { // Deep clones the message only
+                                                                   // when message payload is
+                                                                   // Large, otherwise its
+                                                                   // stack-allocation
+                        // System channel is closed, maybe remove it from routing?
+                    }
                 }
             }
         }
