@@ -70,27 +70,37 @@ pub trait SystemHandler: Send + Sync {
 }
 
 pub struct Spine {
-    system_channels: Arc<ArcSwap<HashMap<String, mpsc::UnboundedSender<Message>>>>, // Arc because
-                                                                                    // it needs to
-                                                                                    // be moved
-                                                                                    // across
-                                                                                    // threads,
-                                                                                    // ArcSwap for
-                                                                                    // hot-swappable
-                                                                                    // mods
-    message_router: Arc<ArcSwap<HashMap<String, Vec<String>>>>, // Same thing as on top
+    system_channels: Arc<HashMap<&'static str, mpsc::UnboundedSender<Message>>>, 
+    message_router: Arc<HashMap<&'static str, Vec<&'static str>>>, 
 }
 
 impl Spine {
-    pub fn register_system(&mut self, system_name: String, handler: Box<dyn SystemHandler>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.system_channels.insert(system_name, tx);
+
+pub fn new(systems: Vec<(&'static str, Box<dyn SystemHandler>, Vec<&'static str>)>) -> Self {
+        let mut system_channels = HashMap::new();
+        let mut message_router = HashMap::new();
         
-        tokio::spawn(async move {
-            handler.run(rx).await;
-        });
+        for (system_name, handler, subscriptions) in systems {
+            let (tx, rx) = mpsc::unbounded_channel();
+            system_channels.insert(system_name, tx);
+            for message_id in subscriptions {
+                message_router
+                    .entry(message_id)
+                    .or_insert_with(Vec::new)
+                    .push(system_name);
+            }
+
+            tokio::spawn(async move {
+                handler.run(rx).await;
+            });
+        }
+        
+        Self {
+            system_channels: Arc::new(system_channels),
+            message_router: Arc::new(message_router),
+        }
     }
-    
+
     pub fn publish(&self, message: Message) {
         let router = self.message_router.load();
         
