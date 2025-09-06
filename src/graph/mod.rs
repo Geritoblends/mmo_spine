@@ -1,88 +1,26 @@
 use tokio::sync::{broadcast, mpsc};
 
-pub trait Message {
-    fn get_id(&self) -> &'static str;
-}
-
-pub enum MessagePayload {
-    Small([u8; 64]),
-    Large([u8; 1024]),
-    Unsized(Box<[u8]>)
-}
-
-impl AsRef<[u8]> for MessagePayload {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            MessagePayload::Small(arr) => arr.as_ref(),
-            MessagePayload::Large(arr) => arr.as_ref(), 
-            MessagePayload::Unsized(boxed) => boxed.as_ref(),
-        }
-    }
-}
-
+#[derive(Clone, Copy)]
 pub struct Message {
-    id: &'static str,
-    payload: MessagePayload,
-    payload_len: usize,
+    id: [u8; 32],
+    payload: [u8; 255],
+    payload_len: u8,
 }
 
-impl Message {
-    pub fn payload_bytes(&self) -> &[u8] {
-        &self.payload.as_ref()[..self.payload_len]
-
-    }
-
-    pub fn parse<T>(&self) -> Result<T, bincode::error::Error>
-        where
-            T: for<'de> Deserialize<'de>
-    {
-        let bytes = self.payload_bytes();
-
-        let msg = bincode::deserialize::<T>(&bytes)?;
-        Ok(msg)
-    }
-
+pub struct Handler {
+    id: [u8; 32],
+    command_receiver: mpsc::Receiver<Message>,
+    command_senders: ArcSwap<HashMap<[u8; 32], mpsc::Sender<Message>>>,
+    message_receivers: Vec<broadcast::Receiver<Message>>,
+    message_sender: broadcast::Sender<Message>
 }
 
-
-#[derive(ThisError, Debug)]
-pub enum Error {
-
-    #[error("Error sending command: {0}")]
-    MpscSender(#[from] mpsc::error::SendError),
-
-    #[error("Type mismatch while downcasting: expected: {expected}.")]
-    DowncastingError {
-        expected: &'static str
-    },
-
-}
-
-trait AnyMpscSender {
-    fn send_any(&self, msg: &dyn Any) -> Result<(), Error>;
-}
-
-trait AnyBroadcastReceiver {
-    fn recv_any(&mut self); // Handlers will implement it based on their own side-effect message
-                            // dependencies
-}
-
-impl<T: Send + Sync + Clone + 'static> AnyMpscSender for mpsc::Sender<T> {
-    fn send_any(&self, msg: &dyn Any) -> Result<(), Error> {
-        if let Some(typed_msg) = msg.downcast_ref::<T>() {
-            self.send(typed_msg.clone())?;
-         else {
-            return Err(Error::DowncastingError { expected:  std::any::type_name::<T>()) });
-        }
-        Ok(())
-    }
-}
-
-pub struct Handler<I, O> {
-    id: &'static str,
-    command_receiver: mpsc::Receiver<I>,
-    command_senders: Arc<HashMap<&'static str, Box<dyn AnyMpscSender>>>,
-    message_receivers: Vec<Box<dyn AnyBroadcastReceiver>>,
-    message_sender: broadcast::Sender<O>
-}
-
+// Pending
+// 1. Find a way to serialize arbitrary types into either a message or an array of messages (or a
+//    Vec::with_capacity) ergonomically
+// 2. Ergonomics layer
+// 3. Message pooling system
+// 4. Handler discovery/routing
+// 5. Deterministic ID generation (4.)
+// 6. proof with simple handlers
+//
